@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: citas_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: citas_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: citas_backend
+    # Single source of truth for credentials — edit backend/.env then `docker compose up -d backend`
+    env_file:
+      - ./backend/.env
+    environment:
+      # Credenciales de sesión de WhatsApp (volumen persistente: sobrevive reinicios)
+      WA_DATA_PATH: /app/storage/whatsapp
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/prisma:/app/prisma
+      - wa_sessions:/app/storage/whatsapp
+    working_dir: /app
+    command: bash -c "npx prisma generate && npx prisma db push --accept-data-loss --skip-generate && (npm run db:seed 2>/dev/null || true) && npm run dev"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: citas_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:3001"
+      # Enable polling so the dev server detects edits on Windows bind mounts
+      WATCHPACK_POLLING: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/app:/app/app
+      - ./frontend/components:/app/components
+      - ./frontend/lib:/app/lib
+    working_dir: /app
+    command: npm run dev
+
+volumes:
+  postgres_data:
+  wa_sessions:

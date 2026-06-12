@@ -1,0 +1,564 @@
+// Prisma schema — Multitenant Appointment SaaS (multi-industry)
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────────── TENANT ROOT ─────────────────────────────
+model Company {
+  id       String  @id @default(cuid())
+  name     String
+  slug     String  @unique
+  industry String? // "Barbería", "Spa", "Clínica", "Taller"…
+  logo     String?
+  address  String?
+  phone    String?
+  email    String?
+  timezone String  @default("America/Mexico_City")
+
+  // WhatsApp Cloud API credentials (per tenant) — integración futura
+  whatsappPhoneNumberId String?
+  whatsappAccessToken   String?
+  whatsappVerifyToken   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users              User[]
+  staff              Staff[]
+  services           Service[]
+  serviceCategories  ServiceCategory[]
+  resources          Resource[]
+  businessHours      BusinessHours[]
+  customers          Customer[]
+  appointments       Appointment[]
+  aiConfig           AiConfig?
+  cancellationPolicy CancellationPolicy?
+  businessRules      BusinessRule[]
+  campaigns          Campaign[]
+  googleCalendar     GoogleCalendarAccount?
+  whatsappMessages   WhatsAppMessage[]
+  conversations      ConversationState[]
+  knowledgeDocuments KnowledgeDocument[]
+  whatsappSession    WhatsAppSession?
+
+  @@map("companies")
+}
+
+// ───────────────────────────── AUTH / USERS ─────────────────────────────
+enum UserRole {
+  ADMIN
+  STAFF
+}
+
+model User {
+  id        String   @id @default(cuid())
+  companyId String
+  email     String   @unique
+  password  String
+  name      String
+  role      UserRole @default(ADMIN)
+  // Optional link to a Staff profile (a STAFF user that also performs services)
+  staffId   String?  @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  staff   Staff?  @relation(fields: [staffId], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+  @@map("users")
+}
+
+// ───────────────────────────── STAFF (personal) ─────────────────────────────
+model Staff {
+  id                  String  @id @default(cuid())
+  companyId           String
+  name                String
+  photo               String?
+  title               String? // Cargo: "Barbero", "Estilista", "Técnico"…
+  bio                 String?
+  active              Boolean @default(true)
+  priority            Int     @default(0) // mayor = preferido por el motor de asignación
+  simultaneousCapacity Int    @default(1) // cuántas citas puede atender a la vez
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company      Company         @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  services     StaffService[]
+  schedule     StaffSchedule[]
+  timeOff      StaffTimeOff[]
+  appointments Appointment[]
+  user         User?
+
+  @@index([companyId])
+  @@map("staff")
+}
+
+// Servicios que un empleado puede realizar (+ duración promedio propia opcional)
+model StaffService {
+  id          String @id @default(cuid())
+  staffId     String
+  serviceId   String
+  avgDuration Int? // sobreescribe Service.duration para este empleado (minutos)
+
+  staff   Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, serviceId])
+  @@index([staffId])
+  @@index([serviceId])
+  @@map("staff_services")
+}
+
+// Horario laboral semanal por empleado (0 = domingo … 6 = sábado)
+model StaffSchedule {
+  id        String  @id @default(cuid())
+  staffId   String
+  dayOfWeek Int
+  isWorking Boolean @default(true)
+  startTime String  @default("09:00")
+  endTime   String  @default("18:00")
+
+  staff Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@unique([staffId, dayOfWeek])
+  @@index([staffId])
+  @@map("staff_schedules")
+}
+
+enum TimeOffType {
+  VACATION
+  ABSENCE
+  BLOCK
+  HOLIDAY
+}
+
+// Vacaciones, ausencias y bloqueos manuales (rango de fechas/horas)
+model StaffTimeOff {
+  id      String      @id @default(cuid())
+  staffId String
+  type    TimeOffType @default(BLOCK)
+  start   DateTime
+  end     DateTime
+  allDay  Boolean     @default(true)
+  reason  String?
+
+  createdAt DateTime @default(now())
+
+  staff Staff @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId])
+  @@index([start])
+  @@map("staff_time_off")
+}
+
+// ───────────────────────────── SERVICES ─────────────────────────────
+model ServiceCategory {
+  id        String  @id @default(cuid())
+  companyId String
+  name      String
+  color     String? // para el calendario/UI
+
+  company  Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  services Service[]
+
+  @@index([companyId])
+  @@map("service_categories")
+}
+
+model Service {
+  id          String  @id @default(cuid())
+  companyId   String
+  categoryId  String?
+  name        String
+  description String?
+  price       Float   @default(0)
+  duration    Int     @default(60) // minutos
+  prepTime    Int     @default(0) // tiempo de preparación (minutos)
+  cleanupTime Int     @default(0) // tiempo de limpieza (minutos)
+  buffer      Int     @default(0) // separación entre citas (minutos)
+  active      Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company      Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  category     ServiceCategory?  @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  staff        StaffService[]
+  resources    ServiceResource[]
+  appointments Appointment[]
+
+  @@index([companyId])
+  @@map("services")
+}
+
+// ───────────────────────────── RESOURCES (recursos compartidos) ─────────────────────────────
+model Resource {
+  id        String  @id @default(cuid())
+  companyId String
+  name      String
+  type      String? // "Cabina", "Silla", "Equipo", "Camilla"…
+  capacity  Int     @default(1) // unidades disponibles en paralelo
+  active    Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company      Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  services     ServiceResource[]
+  appointments AppointmentResource[]
+
+  @@index([companyId])
+  @@map("resources")
+}
+
+// Un servicio puede requerir N unidades de un recurso
+model ServiceResource {
+  id         String @id @default(cuid())
+  serviceId  String
+  resourceId String
+  quantity   Int    @default(1)
+
+  service  Service  @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  resource Resource @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceId, resourceId])
+  @@map("service_resources")
+}
+
+// Reserva de recursos por cita (evita sobreasignación)
+model AppointmentResource {
+  id            String @id @default(cuid())
+  appointmentId String
+  resourceId    String
+  quantity      Int    @default(1)
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+  resource    Resource    @relation(fields: [resourceId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([resourceId])
+  @@map("appointment_resources")
+}
+
+// ───────────────────────────── CUSTOMERS (CRM) ─────────────────────────────
+model Customer {
+  id                String  @id @default(cuid())
+  companyId         String
+  name              String
+  phone             String
+  email             String?
+  notes             String?
+  birthday          DateTime?
+  lateCancellations Int     @default(0)
+  noShows           Int     @default(0)
+  vip               Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company      Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  appointments Appointment[]
+  campaignSends CampaignSend[]
+
+  @@unique([companyId, phone])
+  @@index([companyId])
+  @@map("customers")
+}
+
+// ───────────────────────────── APPOINTMENTS ─────────────────────────────
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+model Appointment {
+  id         String  @id @default(cuid())
+  companyId  String
+  customerId String
+  serviceId  String?
+  staffId    String?
+
+  startTime DateTime
+  endTime   DateTime
+
+  status        AppointmentStatus @default(PENDING)
+  price         Float? // snapshot del precio al reservar (para métricas)
+  notes         String?
+  googleEventId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company   Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  customer  Customer              @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  service   Service?              @relation(fields: [serviceId], references: [id], onDelete: SetNull)
+  staff     Staff?                @relation(fields: [staffId], references: [id], onDelete: SetNull)
+  resources AppointmentResource[]
+  reminders Reminder[]
+
+  @@index([companyId])
+  @@index([customerId])
+  @@index([staffId])
+  @@index([startTime])
+  @@map("appointments")
+}
+
+// ───────────────────────────── AI CONFIG & KNOWLEDGE BASE ─────────────────────────────
+model AiConfig {
+  id                 String  @id @default(cuid())
+  companyId          String  @unique
+  enabled            Boolean @default(true)
+  personality        String  @default("Amable, cercana y profesional")
+  tone               String  @default("Formal pero amigable")
+  objectives         String  @default("Agendar citas, resolver dudas y fidelizar clientes.")
+  rules              String  @default("No inventes precios. No ofrezcas horarios ocupados. Respeta siempre los buffers.")
+  greeting           String  @default("¡Hola! 👋 Soy el asistente virtual. ¿En qué puedo ayudarte hoy?")
+  customSystemPrompt String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("ai_configs")
+}
+
+model KnowledgeDocument {
+  id        String   @id @default(cuid())
+  companyId String
+  title     String
+  content   String   @db.Text
+  active    Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@map("knowledge_documents")
+}
+
+// ───────────────────────────── BUSINESS HOURS (company-level) ─────────────────────────────
+model BusinessHours {
+  id        String  @id @default(cuid())
+  companyId String
+  dayOfWeek Int
+  isOpen    Boolean @default(true)
+  startTime String  @default("09:00")
+  endTime   String  @default("18:00")
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, dayOfWeek])
+  @@index([companyId])
+  @@map("business_hours")
+}
+
+// ───────────────────────────── CANCELLATION POLICY ─────────────────────────────
+model CancellationPolicy {
+  id               String @id @default(cuid())
+  companyId        String @unique
+  minHoursBefore   Int    @default(24)
+  warningThreshold Int    @default(1)
+  warningMessage   String @default("Recuerda que las cancelaciones deben hacerse con al menos 24 horas de anticipación.")
+  penaltyMessage   String @default("Has cancelado tarde en varias ocasiones. Futuras reservas podrían requerir depósito.")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("cancellation_policies")
+}
+
+// ───────────────────────────── RULES ENGINE ─────────────────────────────
+enum RuleKey {
+  NO_SAME_DAY_BOOKING
+  REQUIRE_DEPOSIT
+  MAX_CANCELLATIONS
+  NO_SHOW_PENALTY
+  MIN_HOURS_BEFORE_BOOKING
+  MAX_BOOKINGS_PER_DAY
+  ALLOW_DOUBLE_BOOKING
+}
+
+model BusinessRule {
+  id        String  @id @default(cuid())
+  companyId String
+  key       RuleKey
+  enabled   Boolean @default(false)
+  numValue  Float? // p.ej. monto de depósito, nº máximo de cancelaciones
+  strValue  String? // p.ej. mensaje de penalización
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, key])
+  @@index([companyId])
+  @@map("business_rules")
+}
+
+// ───────────────────────────── REMARKETING / CAMPAIGNS ─────────────────────────────
+enum CampaignTrigger {
+  INACTIVITY // clientes sin visitar en N días
+  VIP // clientes frecuentes / marcados VIP
+  BIRTHDAY // cumpleaños
+  POST_VISIT // seguimiento tras una visita
+  CUSTOM
+}
+
+enum CampaignChannel {
+  WHATSAPP
+  EMAIL
+  SMS
+  INSTAGRAM
+}
+
+model Campaign {
+  id              String          @id @default(cuid())
+  companyId       String
+  name            String
+  trigger         CampaignTrigger @default(INACTIVITY)
+  channel         CampaignChannel @default(WHATSAPP)
+  inactivityDays  Int? // usado por trigger INACTIVITY
+  messageTemplate String          @default("¡Te extrañamos! Vuelve y disfruta una promoción especial. 💖")
+  active          Boolean         @default(true)
+  lastRunAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company        @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  sends   CampaignSend[]
+
+  @@index([companyId])
+  @@map("campaigns")
+}
+
+// Log de envíos de campaña (arquitectura; el envío real es integración futura)
+model CampaignSend {
+  id         String   @id @default(cuid())
+  campaignId String
+  customerId String
+  status     String   @default("PENDING") // PENDING | SENT | FAILED | SKIPPED
+  channel    String
+  sentAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  campaign Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([campaignId])
+  @@index([customerId])
+  @@map("campaign_sends")
+}
+
+// ───────────────────────────── REMINDERS ─────────────────────────────
+model Reminder {
+  id                     String    @id @default(cuid())
+  appointmentId          String
+  hoursBeforeAppointment Int
+  sent                   Boolean   @default(false)
+  sentAt                 DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@map("reminders")
+}
+
+// ───────────────────────────── GOOGLE CALENDAR (integración futura) ─────────────────────────────
+model GoogleCalendarAccount {
+  id           String    @id @default(cuid())
+  companyId    String    @unique
+  email        String?
+  accessToken  String
+  refreshToken String
+  calendarId   String    @default("primary")
+  expiryDate   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("google_calendar_accounts")
+}
+
+// ───────────────────────────── WHATSAPP ─────────────────────────────
+// Sesión de dispositivo vinculado (whatsapp-web.js) — una por empresa, aislada.
+enum WhatsAppSessionStatus {
+  DISCONNECTED
+  INITIALIZING
+  QR_PENDING
+  CONNECTED
+  RECONNECTING
+}
+
+model WhatsAppSession {
+  id          String                @id @default(cuid())
+  companyId   String                @unique
+  status      WhatsAppSessionStatus @default(DISCONNECTED)
+  phoneNumber String? // número vinculado (ej. "5215512345678")
+  displayName String? // pushname de la cuenta
+  connectedAt DateTime? // primera vez que esta sesión quedó vinculada
+  lastSyncAt  DateTime? // último evento de la sesión (mensaje in/out, ready)
+  lastQrAt    DateTime? // último QR generado
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("whatsapp_sessions")
+}
+
+model WhatsAppMessage {
+  id          String   @id @default(cuid())
+  companyId   String
+  phoneNumber String
+  message     String
+  direction   String
+  createdAt   DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([phoneNumber])
+  @@map("whatsapp_messages")
+}
+
+model ConversationState {
+  id          String   @id @default(cuid())
+  companyId   String
+  phoneNumber String
+  state       String
+  context     String
+  botMode     String   @default("AI")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([companyId, phoneNumber])
+  @@index([companyId])
+  @@map("conversation_states")
+}
